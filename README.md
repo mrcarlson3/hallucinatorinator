@@ -18,7 +18,7 @@ The script analyzes the sample text and outputs a JSON report of detected halluc
 Edit `detector.py` to customize:
 
 ```python
-MODEL = "llama3:8b-instruct"      # Change model
+MODEL = "llama3:8b"      # Change model
 MAX_INPUT_LENGTH = 50000           # Max text size (50KB)
 TIMEOUT_SECONDS = 120              # Inference timeout
 MAX_REQUESTS_PER_MINUTE = 10       # Rate limit

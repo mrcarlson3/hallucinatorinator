@@ -155,21 +155,27 @@ def detect_hallucinations(text: str) -> List[Dict[str, Any]]:
     logger.info(f"Analyzing {len(text)} characters")
     text = _sanitize_input(text)
 
-    prompt = f"""You are a legal hallucination detector. Act as a legal scholar and analyze the text to identify fabricated claims. DO NOT assume based on the plausibility of the claim or that the case seems to be real and follows necessary formatting.
+    prompt = """You are an expert U.S. legal claim evaluator with advanced reasoning skills.  
+Your task is to determine whether the following legal claim is factually accurate, fabricated, or cannot be verified based on established U.S. law, federal and state court precedent, and recognized legal principles.
 
-CRITICAL: Return ONLY a JSON array. No explanations, no extra text.
+Your analysis must:
+- Apply U.S. legal doctrines, statutory interpretation, and case-law reasoning.
+- Consider jurisdiction, procedural posture, and relevant legal context.
+- Identify whether the claim aligns with known legal outcomes, typical judicial reasoning, or established precedent.
+- Distinguish verifiable facts from assertions that appear invented, implausible, or unsupported.
+- Provide a concise but thorough legal explanation for your conclusion.
 
-Format:
-[
-  {{"claim": "problematic text", "why": "brief reason"}}
-]
+CRITICAL RULES:
+1. Output ONLY a JSON array.  
+2. Do NOT include any text outside the JSON.  
+3. The JSON must contain objects with this format:
 
-If nothing is fabricated, return: []
+{"claim": "text", "why": "reasoning based on U.S. law"}
 
-Text:
-{text}
+Claim: """ + text + """
 
-JSON array:"""
+JSON array:
+"""
 
     try:
         output = _run_ollama(prompt)
@@ -200,18 +206,18 @@ def verify_claim(claim: str) -> Dict[str, Any]:
     logger.info(f"Verifying: {claim[:50]}...")
     claim = _sanitize_input(claim)
     
-    prompt = f"""You are a legal claim verifier. Analyze this claim and determine if it's fabricated.
+    prompt = """You are a legal claim verifier. Analyze this claim and determine if it's fabricated.
 
 CRITICAL: Return ONLY a JSON object. No explanations, no extra text.
 
 Format:
-{{"verdict": "Supported", "explanation": "reason"}}
+{"verdict": "Supported", "explanation": "reason"}
 OR
-{{"verdict": "Fabricated", "explanation": "reason"}}
+{"verdict": "Fabricated", "explanation": "reason"}
 OR
-{{"verdict": "Unknown", "explanation": "reason"}}
+{"verdict": "Unknown", "explanation": "reason"}
 
-Claim: {claim}
+Claim: """ + claim + """
 
 JSON object:"""
 

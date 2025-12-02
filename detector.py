@@ -1,6 +1,7 @@
 """
-Legal Hallucination Detector - Secure local LLM-based verification
-Detects fabricated cases, fake statutes, and unsupported legal claims.
+Legal Hallucination Detector - Secure local LLM-based verification for legal content
+Designed for pro se litigants and lawyers to detect fabricated cases, fake statutes,
+misquoted holdings, and unsupported legal claims in AI-generated legal content.
 """
 
 import json
@@ -9,73 +10,64 @@ import re
 import subprocess
 import time
 from collections import deque
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List
-
-# Logging configuration
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Configuration
 MODEL = "llama3:8b"
-MAX_INPUT_LENGTH = 50000  # 50KB limit
-MAX_OUTPUT_LENGTH = 100000  # 100KB limit
-TIMEOUT_SECONDS = 120  # 2 minute timeout
+MAX_INPUT_LENGTH = 50000
+MAX_OUTPUT_LENGTH = 100000
+TIMEOUT_SECONDS = 120
 MAX_REQUESTS_PER_MINUTE = 10
+LOG_FILE = Path("legal_hallucination_detector.log")
 
-# Rate limiting state
+# Setup logging
+def setup_logging() -> logging.Logger:
+    logger = logging.getLogger("LegalHallucinationDetector")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    
+    file_handler = logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    return logger
+
+logger = setup_logging()
 _request_timestamps = deque(maxlen=MAX_REQUESTS_PER_MINUTE)
 
 
 def _check_rate_limit() -> None:
-    """Enforce rate limiting to prevent abuse."""
     now = time.time()
-    
-    # Remove old timestamps
     while _request_timestamps and now - _request_timestamps[0] > 60:
         _request_timestamps.popleft()
-    
     if len(_request_timestamps) >= MAX_REQUESTS_PER_MINUTE:
-        logger.warning("Rate limit exceeded")
         raise RuntimeError(f"Rate limit exceeded: max {MAX_REQUESTS_PER_MINUTE} requests/minute")
-    
     _request_timestamps.append(now)
 
 
 def _sanitize_input(text: str) -> str:
-    """Sanitize and validate input text."""
     if not isinstance(text, str):
         raise TypeError("Input must be a string")
-    
-    if len(text) > MAX_INPUT_LENGTH:
-        logger.warning(f"Input truncated: {len(text)} -> {MAX_INPUT_LENGTH} chars")
-        return text[:MAX_INPUT_LENGTH]
-    
-    return text
+    return text[:MAX_INPUT_LENGTH] if len(text) > MAX_INPUT_LENGTH else text
+
+
+def _sanitize_output(text: str) -> str:
+    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', text)
+    return text[:MAX_OUTPUT_LENGTH] if len(text) > MAX_OUTPUT_LENGTH else text
 
 
 def _extract_json(text: str, expect_type: str = "object") -> str:
-    """
-    Extract JSON from model output, handling various formats.
-    
-    Args:
-        text: Raw model output
-        expect_type: "object" for {} or "array" for []
-    
-    Returns:
-        Extracted JSON string
-    """
-    # Try to find JSON markers
-    if expect_type == "array":
-        start_char, end_char = "[", "]"
-    else:
-        start_char, end_char = "{", "}"
-    
+    start_char, end_char = ("[", "]") if expect_type == "array" else ("{", "}")
     try:
         start_idx = text.index(start_char)
-        # Find matching closing bracket
         depth = 0
         for i in range(start_idx, len(text)):
             if text[i] == start_char:
@@ -84,36 +76,12 @@ def _extract_json(text: str, expect_type: str = "object") -> str:
                 depth -= 1
                 if depth == 0:
                     return text[start_idx:i+1]
-        
-        # If no matching bracket found, try simple approach
         return text[start_idx:]
     except ValueError:
         raise ValueError(f"No {expect_type} found in output")
 
 
-def _sanitize_output(text: str) -> str:
-    """Sanitize output by removing control characters and enforcing length limits."""
-    # Remove control characters (keep newline and tab)
-    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', text)
-    
-    if len(text) > MAX_OUTPUT_LENGTH:
-        logger.warning(f"Output truncated: {len(text)} -> {MAX_OUTPUT_LENGTH} chars")
-        return text[:MAX_OUTPUT_LENGTH]
-    
-    return text
-
-
 def _run_ollama(prompt: str) -> str:
-    """
-    Execute Ollama model with security protections.
-    
-    Security features:
-    - Rate limiting
-    - Input/output sanitization
-    - Timeout protection
-    - No shell execution
-    - Error message sanitization
-    """
     _check_rate_limit()
     prompt = _sanitize_input(prompt)
     
@@ -128,182 +96,232 @@ def _run_ollama(prompt: str) -> str:
         )
         
         if result.returncode != 0:
-            logger.error(f"Ollama failed with exit code {result.returncode}")
             raise RuntimeError("Model inference failed")
         
         output = result.stdout.decode("utf-8", errors="ignore").strip()
         return _sanitize_output(output)
         
     except subprocess.TimeoutExpired:
-        logger.error(f"Inference timeout after {TIMEOUT_SECONDS}s")
         raise RuntimeError("Model inference timeout")
     except FileNotFoundError:
-        logger.error("Ollama not found - is it installed?")
         raise RuntimeError("Ollama not found. Install with: brew install ollama")
-    except Exception as e:
-        logger.error(f"Unexpected error: {type(e).__name__}")
-        raise RuntimeError("Model inference failed")
 
 
-def detect_hallucinations(text: str) -> List[Dict[str, Any]]:
-    """
-    Detect fabricated or unsupported legal claims in text.
+def extract_legal_citations(text: str) -> List[Dict[str, str]]:
+    """Extract legal citations from text."""
+    extracted = []
     
-    Returns:
-        List of detected issues with explanations.
-    """
-    logger.info(f"Analyzing {len(text)} characters")
+    patterns = {
+        "case_citation": [
+            r'\d+\s+U\.?S\.?\s+\d+',
+            r'\d+\s+S\.?\s*Ct\.?\s+\d+',
+            r'\d+\s+F\.?\s*(?:2d|3d|4th)?\s+\d+',
+            r'\d+\s+F\.?\s*Supp\.?\s*(?:2d|3d)?\s+\d+',
+            r'\d{4}\s+WL\s+\d+',
+        ],
+        "case_name": [
+            r'([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)\s+v\.?\s+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+        ],
+        "statute": [
+            r'\d+\s+U\.?S\.?C\.?\s*§+\s*\d+(?:\([a-zA-Z0-9]+\))*',
+            r'\d+\s+C\.?F\.?R\.?\s*§+\s*\d+(?:\.\d+)*',
+            r'Fed\.?\s*R\.?\s*(?:Civ\.?|Crim\.?|App\.?|Evid\.?)?\s*P\.?\s*\d+',
+        ],
+    }
+    
+    for citation_type, pattern_list in patterns.items():
+        for pattern in pattern_list:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches:
+                content = " v. ".join(match) if isinstance(match, tuple) else match
+                extracted.append({"type": citation_type, "content": content.strip()})
+    
+    # Deduplicate
+    seen = set()
+    return [e for e in extracted if e["content"].lower() not in seen and not seen.add(e["content"].lower())]
+
+
+def scan_for_hallucinations(text: str) -> Dict[str, Any]:
+    """Scan legal content for potential hallucinations."""
     text = _sanitize_input(text)
+    extracted_citations = extract_legal_citations(text)
+    
+    prompt = """You are a legal fact-checker identifying fabricated content in AI-generated legal text.
 
-    prompt = """You are an expert U.S. legal claim evaluator with advanced reasoning skills.  
-Your task is to determine whether the following legal claim is factually accurate, fabricated, or cannot be verified based on established U.S. law, federal and state court precedent, and recognized legal principles.
+Analyze for:
+1. FABRICATED CASES - Case names/citations that don't exist
+2. FAKE STATUTES - Incorrect statutory citations
+3. MISQUOTED HOLDINGS - Inaccurate quotes attributed to cases
+4. INCORRECT LEGAL PRINCIPLES - Wrongly stated legal rules
+5. JURISDICTIONAL ERRORS - Wrong jurisdiction applied
 
-Your analysis must:
-- Apply U.S. legal doctrines, statutory interpretation, and case-law reasoning.
-- Consider jurisdiction, procedural posture, and relevant legal context.
-- Identify whether the claim aligns with known legal outcomes, typical judicial reasoning, or established precedent.
-- Distinguish verifiable facts from assertions that appear invented, implausible, or unsupported.
-- Provide a concise but thorough legal explanation for your conclusion.
+Return ONLY this JSON:
+{
+    "issues": [
+        {
+            "text": "problematic text",
+            "type": "fabricated_case|fake_statute|misquoted_holding|incorrect_principle|jurisdictional_error",
+            "reasoning": "why this is flagged",
+            "confidence": 0-100
+        }
+    ],
+    "overall_risk": "low|medium|high|critical",
+    "summary": "brief summary"
+}
 
-CRITICAL RULES:
-1. Output ONLY a JSON array.  
-2. Do NOT include any text outside the JSON.  
-3. The JSON must contain objects with this format:
+TEXT TO ANALYZE:
+\"\"\"
+""" + text + """
+\"\"\"
 
-{"claim": "text", "why": "reasoning based on U.S. law"}
-
-Claim: """ + text + """
-
-JSON array:
-"""
+JSON:"""
 
     try:
         output = _run_ollama(prompt)
-        json_str = _extract_json(output, "array")
-        result = json.loads(json_str)
-        
-        if not isinstance(result, list):
-            raise ValueError("Expected JSON array")
-        
-        logger.info(f"Found {len(result)} potential issues")
+        result = json.loads(_extract_json(output))
+        result["extracted_citations"] = extracted_citations
         return result
-        
-    except (ValueError, json.JSONDecodeError) as e:
-        logger.error(f"JSON parsing failed: {e}")
-        return [{"error": "Invalid model output"}]
-    except Exception as e:
-        logger.error(f"Detection failed: {type(e).__name__}")
-        return [{"error": "Detection failed"}]
+    except (ValueError, json.JSONDecodeError):
+        return {"error": "Analysis failed", "extracted_citations": extracted_citations}
 
 
-def verify_claim(claim: str) -> Dict[str, Any]:
-    """
-    Verify a legal claim using logical reasoning.
+def self_verify(original_text: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """Verify the analysis and provide hallucination probability."""
     
-    Returns:
-        Dictionary with verdict and explanation.
-    """
-    logger.info(f"Verifying: {claim[:50]}...")
-    claim = _sanitize_input(claim)
-    
-    prompt = """You are a legal claim verifier. Analyze this claim and determine if it's fabricated.
+    prompt = """Review this hallucination analysis of AI-generated legal content.
 
-CRITICAL: Return ONLY a JSON object. No explanations, no extra text.
+Return ONLY this JSON:
+{
+    "hallucination_probability": 0-100,
+    "reasoning": "brief explanation",
+    "missed_issues": ["any missed problems"],
+    "court_filing_ready": true|false
+}
 
-Format:
-{"verdict": "Supported", "explanation": "reason"}
-OR
-{"verdict": "Fabricated", "explanation": "reason"}
-OR
-{"verdict": "Unknown", "explanation": "reason"}
+ORIGINAL TEXT:
+\"\"\"
+""" + original_text[:5000] + """
+\"\"\"
 
-Claim: """ + claim + """
+ANALYSIS:
+\"\"\"
+""" + json.dumps(analysis, indent=2)[:3000] + """
+\"\"\"
 
-JSON object:"""
+JSON:"""
 
     try:
         output = _run_ollama(prompt)
-        json_str = _extract_json(output, "object")
-        result = json.loads(json_str)
-        
-        if not isinstance(result, dict) or "verdict" not in result:
-            raise ValueError("Invalid result structure")
-        
-        # Validate verdict
-        valid_verdicts = {"Supported", "Fabricated", "Unknown"}
-        if result["verdict"] not in valid_verdicts:
-            logger.warning(f"Invalid verdict '{result['verdict']}', defaulting to Unknown")
-            result["verdict"] = "Unknown"
-        
-        logger.info(f"Verdict: {result['verdict']}")
-        return result
-        
-    except (ValueError, json.JSONDecodeError) as e:
-        logger.error(f"JSON parsing failed: {e}")
-        return {"verdict": "Unknown", "explanation": "Parsing failed"}
-    except Exception as e:
-        logger.error(f"Verification failed: {type(e).__name__}")
-        return {"verdict": "Unknown", "explanation": "Verification failed"}
+        return json.loads(_extract_json(output))
+    except (ValueError, json.JSONDecodeError):
+        return {"hallucination_probability": 50, "court_filing_ready": False, "reasoning": "Verification failed"}
+
+
+def analyze_legal_content(text: str) -> Dict[str, Any]:
+    """Main analysis function."""
+    logger.info(f"Analyzing {len(text)} characters")
+    start_time = time.time()
+    
+    scan_result = scan_for_hallucinations(text)
+    if "error" in scan_result:
+        return scan_result
+    
+    verification = self_verify(text, scan_result)
+    
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "hallucination_probability": verification.get("hallucination_probability", 50),
+        "court_filing_ready": verification.get("court_filing_ready", False),
+        "overall_risk": scan_result.get("overall_risk", "unknown"),
+        "summary": scan_result.get("summary", ""),
+        "issues": scan_result.get("issues", []),
+        "citations_found": scan_result.get("extracted_citations", []),
+        "verification_reasoning": verification.get("reasoning", ""),
+        "processing_seconds": round(time.time() - start_time, 2)
+    }
+
+
+def format_report(result: Dict[str, Any]) -> str:
+    """Format analysis as a clean report."""
+    lines = [
+        "=" * 60,
+        "LEGAL HALLUCINATION ANALYSIS",
+        "=" * 60,
+        "",
+        f"Hallucination Probability: {result.get('hallucination_probability', 'N/A')}%",
+        f"Overall Risk: {result.get('overall_risk', 'unknown').upper()}",
+        f"Court Filing Ready: {'Yes' if result.get('court_filing_ready') else 'No'}",
+        "",
+        f"Summary: {result.get('summary', 'N/A')}",
+        ""
+    ]
+    
+    issues = result.get("issues", [])
+    if issues:
+        lines.append("-" * 60)
+        lines.append(f"ISSUES FOUND ({len(issues)}):")
+        lines.append("-" * 60)
+        for i, issue in enumerate(sorted(issues, key=lambda x: x.get("confidence", 0), reverse=True), 1):
+            lines.append(f"\n{i}. [{issue.get('type', 'unknown').upper()}] (Confidence: {issue.get('confidence', 'N/A')}%)")
+            lines.append(f"   Text: {issue.get('text', 'N/A')[:100]}")
+            lines.append(f"   Reason: {issue.get('reasoning', 'N/A')}")
+    
+    citations = result.get("citations_found", [])
+    if citations:
+        lines.append("")
+        lines.append("-" * 60)
+        lines.append(f"CITATIONS EXTRACTED ({len(citations)}):")
+        lines.append("-" * 60)
+        for c in citations[:10]:
+            lines.append(f"  [{c.get('type', 'unknown')}] {c.get('content', 'N/A')}")
+        if len(citations) > 10:
+            lines.append(f"  ... and {len(citations) - 10} more")
+    
+    lines.extend([
+        "",
+        "=" * 60,
+        "IMPORTANT: Verify all citations in Westlaw, LexisNexis, or",
+        "Google Scholar before use in any court filing.",
+        "=" * 60
+    ])
+    
+    return "\n".join(lines)
 
 
 def main():
-    """Main entry point for the detector."""
-    print("=" * 70)
-    print("Legal Hallucination Detector")
-    print("=" * 70)
-    print("\nEnter legal text to analyze (press Ctrl+D or Ctrl+Z when done):")
-    print("-" * 70)
+    print("=" * 60)
+    print("LEGAL HALLUCINATION DETECTOR")
+    print("=" * 60)
+    print("\nPaste AI-generated legal text (Ctrl+D/Ctrl+Z to finish):\n")
     
-    # Read multiline input
     lines = []
     try:
         while True:
-            line = input()
-            lines.append(line)
+            lines.append(input())
     except EOFError:
         pass
     
     text = "\n".join(lines).strip()
-    
     if not text:
-        print("\nNo text provided. Exiting.")
+        print("\nNo text provided.")
         return
     
-    print("\n" + "=" * 70)
-    logger.info("Starting hallucination detection")
-    print("Analyzing text for hallucinations...\n")
+    print("\nAnalyzing...\n")
+    result = analyze_legal_content(text)
+    print(format_report(result))
     
-    # Detect hallucinations
-    results = detect_hallucinations(text)
-    print(json.dumps(results, indent=2))
-    
-    # Verify each detected claim
-    if results and not any("error" in r for r in results):
-        print("\n" + "-" * 70)
-        print("Verifying detected claims...")
-        print("-" * 70)
-        
-        for item in results:
-            claim = item.get("claim")
-            if claim:
-                print(f"\nClaim: {claim[:60]}...")
-                verdict = verify_claim(claim)
-                print(json.dumps(verdict, indent=2))
-    
-    print("\n" + "=" * 70)
-    logger.info("Detection completed successfully")
-    print("Analysis complete.")
-    print("=" * 70)
+    # Save JSON
+    output_file = Path(f"legal_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    with open(output_file, 'w') as f:
+        json.dump(result, f, indent=2)
+    print(f"\nJSON saved to: {output_file}")
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-        print("\n\nProcess interrupted")
-        exit(0)
+        print("\n\nCancelled.")
     except Exception as e:
-        logger.error(f"Fatal error: {type(e).__name__} - {e}")
+        logger.error(f"Error: {e}")
         print(f"\nError: {e}")
-        exit(1)

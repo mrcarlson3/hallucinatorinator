@@ -1,3 +1,32 @@
 Pipfile
 *.json
 *.log
+
+# ChromaDB files
+chroma.sqlite3
+chroma.sqlite3-shm
+chroma.sqlite3-wal
+
+# ChromaDB directory (if using persistent storage)
+chroma_db/
+legal_cache/
+
+legal_vectordb/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment
+.env
+.venv
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

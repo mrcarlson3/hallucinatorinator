@@ -3,9 +3,11 @@ Legal Hallucination Detector
 Three-stage analysis using LegalRAG for citation verification
 """
 
+
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
 
 import json
 import re
@@ -15,14 +17,20 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+
 # Import the RAG system
 from legal_rag import LegalRAG, enhanced_scan_with_rag
+
 
 MODEL = "llama3:8b"
 TIMEOUT = 180
 
 
+
+
 def run_ollama(prompt: str) -> str:
+    # Executes the Llama model locally via Ollama CLI, passing the prompt as stdin.
+    # Returns the model's text output or raises an error if the subprocess fails.
     """Execute Ollama model."""
     result = subprocess.run(
         ["ollama", "run", MODEL],
@@ -36,7 +44,11 @@ def run_ollama(prompt: str) -> str:
     return result.stdout.decode().strip()
 
 
+
+
 def extract_citations(text: str) -> list:
+    # Parses legal text using regex patterns to identify case citations in various formats.
+    # Returns a list of citation dictionaries containing case names, reporters, volumes, and pages.
     """Extract legal citations from text."""
     citations = []
     
@@ -106,7 +118,11 @@ def extract_citations(text: str) -> list:
     return citations
 
 
+
+
 def verify_citations_with_rag(citations: list) -> dict:
+    # Sends extracted citations to the LegalRAG module for verification against CourtListener.
+    # Returns a dictionary with verified citations, unverified citations, and verification statistics.
     """Use LegalRAG to verify all citations."""
     
     if not citations:
@@ -129,7 +145,11 @@ def verify_citations_with_rag(citations: list) -> dict:
     return results
 
 
+
+
 def stage1_initial_analysis(text: str, rag_results: dict) -> dict:
+    # Performs the first stage of analysis by prompting the LLM with RAG verification results.
+    # The LLM provides a preliminary scholarly assessment of document reliability based on citation status.
     """Stage 1: Initial LLM assessment informed by RAG verification."""
     
     verified = rag_results.get("verified", [])
@@ -152,23 +172,30 @@ WARNING: {len(unverified)} CITATION(S) COULD NOT BE VERIFIED IN COURTLISTENER:
     
     prompt = f"""You are a legal scholar analyzing a document for potential hallucinations.
 
+
 COURTLISTENER DATABASE VERIFICATION RESULTS:{citation_status}
+
 
 VERIFICATION DETAILS:
 {rag_context}
+
 
 DOCUMENT TEXT:
 ---
 {text[:7000]}
 ---
 
+
 Based on the citation verification results above, provide your scholarly assessment:
+
 
 1. If citations COULD NOT BE VERIFIED, this strongly suggests hallucination - fabricated cases
 2. Analyze other claims for accuracy: legal standards, procedures, dates
 3. Assess overall reliability
 
+
 Write 2-3 paragraphs. Be direct about hallucination risks."""
+
 
     try:
         response = run_ollama(prompt)
@@ -181,7 +208,11 @@ Write 2-3 paragraphs. Be direct about hallucination risks."""
         return {"error": str(e), "preliminary_assessment": f"Analysis failed: {e}"}
 
 
+
+
 def stage2_hallucination_analysis(text: str, stage1: dict, rag_results: dict) -> dict:
+    # Conducts a focused investigation into citations that failed verification in stage 1.
+    # If all citations verified, returns early; otherwise prompts the LLM to analyze claims dependent on unverified cases.
     """Stage 2: Focused hallucination analysis."""
     
     unverified = rag_results.get("unverified", [])
@@ -200,25 +231,32 @@ def stage2_hallucination_analysis(text: str, stage1: dict, rag_results: dict) ->
     
     prompt = f"""You are a legal scholar investigating CONFIRMED citation problems.
 
+
 THE FOLLOWING CITATIONS FAILED VERIFICATION IN COURTLISTENER:
 {unverified_detail}
 
+
 These citations were searched in CourtListener (a comprehensive legal database with millions of cases) and NOT FOUND. This is strong evidence the cases are fabricated/hallucinated.
+
 
 VERIFIED CITATIONS (for comparison):
 {len(verified)} citations were successfully verified.
+
 
 ORIGINAL DOCUMENT:
 ---
 {text[:5000]}
 ---
 
+
 Analyze:
 1. What specific claims depend on these unverified citations?
 2. If the cases don't exist, what does that mean for the document's reliability?
 3. Are there any other red flags (wrong dates, impossible procedures, etc.)?
 
+
 Write 2-3 paragraphs. Treat unverified citations as PROBABLE HALLUCINATIONS."""
+
 
     try:
         response = run_ollama(prompt)
@@ -231,7 +269,11 @@ Write 2-3 paragraphs. Treat unverified citations as PROBABLE HALLUCINATIONS."""
         return {"error": str(e), "verification_notes": f"Analysis failed: {e}"}
 
 
+
+
 def stage3_final_synthesis(text: str, stage1: dict, stage2: dict, rag_results: dict) -> dict:
+    # Synthesizes findings from stages 1 and 2 into a final risk assessment with confidence scores.
+    # Applies conservative overrides to ensure unverified citations always result in high-risk ratings.
     """Stage 3: Final synthesis with mandatory risk assessment."""
     
     verified = rag_results.get("verified", [])
@@ -251,27 +293,33 @@ def stage3_final_synthesis(text: str, stage1: dict, stage2: dict, rag_results: d
     
     prompt = f"""You are a legal scholar writing a final assessment.
 
+
 VERIFICATION SUMMARY:
 - Verified citations: {len(verified)}
 - Unverified citations: {len(unverified)}
 - Verification rate: {verification_rate:.1f}%
 - Risk assessment: {risk_reason}
 
+
 STAGE 1 FINDINGS:
 {stage1.get('preliminary_assessment', 'N/A')[:1200]}
 
+
 STAGE 2 FINDINGS:
 {stage2.get('verification_notes', 'N/A')[:1200]}
+
 
 Write a final 2-3 paragraph professional assessment summarizing:
 1. What was analyzed
 2. Whether hallucinations were detected (be specific about which citations)
 3. Reliability conclusion
 
+
 End with exactly these three lines:
 CONFIDENCE: [number 0-100]
 RISK: [low/medium/high/critical]
 RECOMMENDATION: [one clear sentence]"""
+
 
     try:
         response = run_ollama(prompt)
@@ -314,7 +362,11 @@ RECOMMENDATION: [one clear sentence]"""
         }
 
 
+
+
 def format_report(stage1: dict, stage2: dict, stage3: dict, rag_results: dict, citations: list, processing_time: float) -> str:
+    # Assembles all analysis results into a human-readable plaintext report with clear sections.
+    # Includes citation verification details, stage-by-stage findings, and final risk determination.
     """Format the final report."""
     
     verified = rag_results.get("verified", [])
@@ -405,7 +457,11 @@ def format_report(stage1: dict, stage2: dict, stage3: dict, rag_results: dict, c
     return "\n".join(lines)
 
 
+
+
 def analyze(text: str) -> str:
+    # Orchestrates the complete three-stage hallucination detection pipeline from input to report.
+    # Coordinates citation extraction, RAG verification, LLM analysis stages, and final report generation.
     """Main analysis pipeline."""
     start = time.time()
     
@@ -442,7 +498,11 @@ def analyze(text: str) -> str:
     return format_report(stage1, stage2, stage3, rag_results, citations, processing_time)
 
 
+
+
 if __name__ == "__main__":
+    # Entry point that handles command-line file input or interactive stdin input.
+    # Validates input presence and triggers the main analysis pipeline.
     if len(sys.argv) > 1:
         input_path = Path(sys.argv[1])
         if input_path.exists():

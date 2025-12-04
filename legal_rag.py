@@ -113,7 +113,7 @@ class LegalRAG:
                 "date_filed": data.get("dateFiled") or data.get("date_filed"),
                 "docket_number": data.get("docketNumber") or data.get("docket_number"),
                 "search_method": "citation-lookup",
-                "confidence": 95
+                "confidence": 90
             })
             cache_file.write_text(json.dumps(result, indent=2))
             return result

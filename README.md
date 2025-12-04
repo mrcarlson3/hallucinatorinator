@@ -14,9 +14,13 @@ ollama pull llama3:8b
 # Run detector 
 python3 detector.py
 
-
 ```
+In order to get courtlistener verification, set your CourtListener API key as an env variable:
 
+```bash
+export COURTLISTENER_API_KEY="your_api_key_here"
+```
+Must make an account on https://www.courtlistener.com/ to get an API key.
 ## Features
 
 - **detector.py** - Standalone hallucination detection using local LLM

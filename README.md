@@ -21,16 +21,9 @@ In order to get courtlistener verification, set your CourtListener API key as an
 export COURTLISTENER_API_KEY="your_api_key_here"
 ```
 Must make an account on https://www.courtlistener.com/ to get an API key.
-## Features
+## Files
 
 - **detector.py** - Standalone hallucination detection using local LLM
 - **legal_rag.py** - Citation verification via CourtListener API 
-- 100% local operation (apart from  CourtListener API calls)
-- Rate limiting and input sanitization
-- Audit logging
 
-
-## Disclaimer
-
-Educational purposes only.
 
